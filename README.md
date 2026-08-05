@@ -1,19 +1,19 @@
 # TTS Generator
 
-Application Streamlit pour convertir du texte en audio avec des voix Windows natives ou des voix Microsoft Edge gratuites via `edge-tts`.
+Application Streamlit pour convertir du texte en audio avec les voix Microsoft Edge (`edge-tts`), gratuites et sans cle API.
 
 ## Lancer l'application
 
 Double-cliquer sur `launch_ui.bat`, puis :
 
-- coller le texte a convertir ;
-- choisir une voix Windows ou Edge ;
+- rechercher et choisir une voix (barre de recherche par nom, langue ou genre) ;
 - ajuster vitesse, volume et hauteur ;
-- generer puis telecharger le fichier audio.
+- ecouter l'apercu instantane qui se joue automatiquement a chaque changement de voix ou de parametre ;
+- coller le texte final, generer puis telecharger le fichier audio.
 
-Aucune cle API n'est necessaire : les voix Windows et Edge sont utilisees gratuitement.
+Aucune cle API n'est necessaire, une connexion Internet est requise (les voix sont fournies par le service Microsoft Edge).
 
-Le mode SSML est supporte avec les voix Windows. Les voix Edge sont utilisees pour du texte brut uniquement.
+Le mode SSML est disponible mais reste une approximation sur les voix Edge : les balises `<break>` sont converties en pauses et le reste du balisage est retire, sans garantie de minutage exact.
 
 ## Lancer manuellement
 
@@ -23,8 +23,8 @@ python -m streamlit run ui.py
 
 ## Architecture
 
-- `ui.py` : interface Streamlit du generateur TTS (point d'entree de l'application)
-- `services/tts_studio.py` : moteurs TTS Windows (SAPI) et Edge (edge-tts)
+- `ui.py` : interface Streamlit (recherche de voix, apercu en direct, generation et export)
+- `services/tts_studio.py` : moteur TTS Edge (`edge-tts`) et approximation SSML
 - `config.py` : configuration (chemin de sortie des fichiers audio)
 
 ## Tests
