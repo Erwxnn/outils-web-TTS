@@ -290,6 +290,40 @@ def main() -> None:
     job = st.session_state["gen_job"]
     generating = job is not None
 
+    # The nav bar's native "running" indicator is tied 1:1 to each polling
+    # rerun triggered below (every ~250ms): it resets/flickers in lockstep
+    # with the generation progress bar instead of just spinning for the real,
+    # uninterrupted duration of the job. We hide it and draw our own
+    # indicator instead. Crucially, this markup is byte-identical on every
+    # rerun while a job is in flight (no per-rerun token), so Streamlit's
+    # frontend keeps the same DOM node mounted and its CSS animation keeps
+    # spinning without a single cut - fully decoupled from `job["progress"]`
+    # - all the way to the job's actual completion (`job["done"]`).
+    if generating and not job["done"]:
+        st.markdown(
+            """
+            <style>
+            [data-testid="stStatusWidget"] { display: none !important; }
+            @keyframes tss-nav-spin { to { transform: rotate(360deg); } }
+            .tss-nav-spinner {
+                position: fixed;
+                top: 0.6rem;
+                right: 4.5rem;
+                width: 20px;
+                height: 20px;
+                border: 3px solid rgba(49, 51, 63, 0.15);
+                border-top-color: #ff4b4b;
+                border-radius: 50%;
+                animation: tss-nav-spin 0.8s linear infinite;
+                z-index: 999999;
+                pointer-events: none;
+            }
+            </style>
+            <div class="tss-nav-spinner"></div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     generate = st.button(
         "Generer l'audio",
         type="primary",
