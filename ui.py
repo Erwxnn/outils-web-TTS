@@ -65,11 +65,20 @@ def _looks_like_ssml(text: str) -> bool:
 
 
 def _play_hidden_audio(audio_bytes: bytes) -> None:
-    """Play an audio clip in the background, with no visible player."""
+    """Play an audio clip in the background, with no visible player.
+
+    A per-call token is embedded in the markup so the generated HTML string
+    always changes, even when the audio bytes are identical to the previous
+    playback (e.g. clicking "replay" without changing any setting). Without
+    this, the browser sees byte-identical markup on rerun and never
+    recreates the <audio> element, so autoplay only ever fires once.
+    """
+    st.session_state["_audio_play_token"] = st.session_state.get("_audio_play_token", 0) + 1
+    token = st.session_state["_audio_play_token"]
     encoded = base64.b64encode(audio_bytes).decode("ascii")
     st.markdown(
         f"""
-        <audio autoplay style="display:none">
+        <audio id="tts-preview-{token}" autoplay style="display:none">
             <source src="data:audio/mpeg;base64,{encoded}" type="audio/mpeg">
         </audio>
         """,
@@ -104,7 +113,15 @@ def _run_generation_job(studio: TTSStudio, request: TTSRequest, job: dict) -> No
 
 def main() -> None:
     st.set_page_config(page_title="TTS generator", page_icon="🔊", layout="wide")
-    st.markdown("<style>.block-container{padding-top:2.5rem;}</style>", unsafe_allow_html=True)
+    st.markdown(
+        """
+        <style>
+        .block-container{padding-top:2.5rem;}
+        div[data-testid="stPopoverBody"]{min-width: 420px !important;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     settings = Settings.from_env(PROJECT_ROOT)
     configure_logging(settings.output_path)
@@ -115,6 +132,9 @@ def main() -> None:
     st.session_state.setdefault("text_mode", "Texte brut")
     st.session_state.setdefault("text_area_content", DEFAULT_TEXT)
     st.session_state.setdefault("last_uploaded_file_id", None)
+    st.session_state.setdefault("voice_rate", 0)
+    st.session_state.setdefault("voice_volume", 0)
+    st.session_state.setdefault("voice_pitch", 0)
 
     st.title("🔊 TTS Generator")
     st.caption("Colle ton texte, choisis une voix Microsoft Edge, ajuste le rendu, puis exporte l'audio.")
@@ -151,13 +171,32 @@ def main() -> None:
             st.write("")
             col_settings, col_replay = st.columns(2, gap="small")
             with col_settings:
-                with st.popover(
-                    "", icon=":material/tune:", help="Parametres de la voix", width="stretch"
-                ):
+                # The 3-column layout inside the popover (rather than
+                # stacking the sliders vertically) forces the panel to lay
+                # out wider content, and the CSS min-width rule injected
+                # above guarantees it regardless of viewport.
+                #
+                # Values are round-tripped through plain session_state
+                # entries (read as the widget's `value`, written back from
+                # its return) rather than relying on a widget `key` -
+                # Streamlit drops key-bound widget state for widgets that
+                # don't render on a given rerun, which would otherwise
+                # reset the sliders whenever the popover is closed.
+                with st.popover("", icon=":material/tune:", help="Parametres de la voix", width="stretch"):
                     st.caption("Parametres de la voix")
-                    rate = st.slider("Vitesse", -50, 50, 0, help="Pourcentage, -50 a 50")
-                    volume = st.slider("Volume", -50, 50, 0, help="Pourcentage, -50 a 50")
-                    pitch = st.slider("Hauteur de voix", -100, 100, 0, help="Variation en Hz")
+                    col_rate, col_volume, col_pitch = st.columns(3)
+                    with col_rate:
+                        st.session_state["voice_rate"] = st.slider(
+                            "Vitesse", -50, 50, st.session_state["voice_rate"], help="Pourcentage, -50 a 50"
+                        )
+                    with col_volume:
+                        st.session_state["voice_volume"] = st.slider(
+                            "Volume", -50, 50, st.session_state["voice_volume"], help="Pourcentage, -50 a 50"
+                        )
+                    with col_pitch:
+                        st.session_state["voice_pitch"] = st.slider(
+                            "Hauteur de voix", -100, 100, st.session_state["voice_pitch"], help="Variation en Hz"
+                        )
             with col_replay:
                 replay_clicked = st.button(
                     "",
@@ -165,6 +204,10 @@ def main() -> None:
                     help="Rejouer l'apercu vocal (utile si la lecture automatique a ete bloquee).",
                     width="stretch",
                 )
+
+        rate = st.session_state["voice_rate"]
+        volume = st.session_state["voice_volume"]
+        pitch = st.session_state["voice_pitch"]
 
         voice_info = f"{voice.name} | {voice.locale}"
         if voice.gender:
