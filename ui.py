@@ -124,7 +124,7 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Voix Microsoft Edge")
-        st.caption("Voix en ligne gratuites, aucune cle API necessaire. Connexion Internet requise.")
+        st.caption("Voix en ligne gratuites, Connexion Internet requise.")
         if st.button("Rafraichir les voix", icon=":material/refresh:", width="stretch"):
             cached_voices.clear()
             st.rerun()
