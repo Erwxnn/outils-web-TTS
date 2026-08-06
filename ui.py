@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 import sys
 import threading
 import time
@@ -12,6 +13,7 @@ from pathlib import Path
 import streamlit as st
 
 from config import Settings
+from services.file_text import UnsupportedFileError, extract_text
 from services.tts_studio import TTSCancelled, TTSRequest, TTSStudio, Voice
 
 
@@ -53,6 +55,13 @@ def cached_voices() -> list[Voice]:
 
 def voice_label(voice: Voice) -> str:
     return voice.label
+
+
+_SSML_HINT_RE = re.compile(r"<\s*(speak|break|prosody)\b", re.IGNORECASE)
+
+
+def _looks_like_ssml(text: str) -> bool:
+    return bool(_SSML_HINT_RE.search(text))
 
 
 def _play_hidden_audio(audio_bytes: bytes) -> None:
@@ -103,6 +112,9 @@ def main() -> None:
     st.session_state.setdefault("preview_signature", None)
     st.session_state.setdefault("preview_audio", None)
     st.session_state.setdefault("gen_job", None)
+    st.session_state.setdefault("text_mode", "Texte brut")
+    st.session_state.setdefault("text_area_content", DEFAULT_TEXT)
+    st.session_state.setdefault("last_uploaded_file_id", None)
 
     st.title("🔊 TTS Generator")
     st.caption("Colle ton texte, choisis une voix Microsoft Edge, ajuste le rendu, puis exporte l'audio.")
@@ -151,7 +163,30 @@ def main() -> None:
 
     with st.container(border=True):
         st.subheader("📝 Texte")
-        text_mode = st.segmented_control("Mode texte", ["Texte brut", "SSML"], default="Texte brut")
+
+        uploaded_file = st.file_uploader(
+            "Importer un fichier (.txt, .docx, .pdf)",
+            type=["txt", "docx", "pdf"],
+            help="Le texte extrait remplace le contenu de la zone de texte ci-dessous.",
+        )
+        if uploaded_file is not None and uploaded_file.file_id != st.session_state["last_uploaded_file_id"]:
+            st.session_state["last_uploaded_file_id"] = uploaded_file.file_id
+            try:
+                extracted = extract_text(uploaded_file.name, uploaded_file.getvalue())
+            except UnsupportedFileError as exc:
+                st.toast(str(exc), icon="⚠️")
+            except Exception as exc:  # noqa: BLE001 - surfaced to the user as-is
+                st.toast(f"Extraction impossible : {exc}", icon="⚠️")
+            else:
+                if extracted.strip():
+                    st.session_state["text_area_content"] = extracted
+                    st.session_state["text_mode"] = "SSML" if _looks_like_ssml(extracted) else "Texte brut"
+                    st.toast(f"Texte extrait de {uploaded_file.name}.", icon="📄")
+                    st.rerun()
+                else:
+                    st.toast("Aucun texte trouve dans ce fichier.", icon="⚠️")
+
+        text_mode = st.segmented_control("Mode texte", ["Texte brut", "SSML"], key="text_mode")
         if text_mode == "SSML":
             st.caption(
                 "Les balises <break time=\"...\"/> inserent un silence de la duree exacte, et "
@@ -161,8 +196,17 @@ def main() -> None:
                 "prend donc plus de temps a generer."
             )
 
-        default_value = DEFAULT_SSML if text_mode == "SSML" else DEFAULT_TEXT
-        text = st.text_area("Texte a convertir", value=default_value, height=260)
+        # Swap in the matching sample text when the mode toggles, but only if
+        # the field still holds one of the defaults (never overwrite an
+        # upload or something the user typed themselves).
+        previous_mode = st.session_state.get("_prev_text_mode", text_mode)
+        if text_mode != previous_mode:
+            current_content = st.session_state.get("text_area_content", "")
+            if current_content in (DEFAULT_TEXT, DEFAULT_SSML) or not current_content.strip():
+                st.session_state["text_area_content"] = DEFAULT_SSML if text_mode == "SSML" else DEFAULT_TEXT
+        st.session_state["_prev_text_mode"] = text_mode
+
+        text = st.text_area("Texte a convertir", key="text_area_content", height=260)
 
     # Live preview: regenerated only when the voice or a setting actually changes.
     # The preview text and audio player are intentionally not shown to the user.

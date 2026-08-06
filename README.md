@@ -8,7 +8,8 @@ Double-cliquer sur `launch_ui.bat`, puis :
 
 - choisir une voix, puis ouvrir l'icone parametres a cote du selecteur pour ajuster vitesse, volume et hauteur ;
 - un aperçu vocal se joue automatiquement en arriere-plan a chaque changement de voix ou de parametre ;
-- coller le texte final, cliquer sur "Generer l'audio" (le bouton se desactive et affiche une barre de progression pendant la generation, avec un bouton pour annuler), puis telecharger le fichier.
+- coller le texte final, ou l'importer depuis un fichier `.txt`, `.docx` ou `.pdf` via le bouton d'import (le texte extrait remplace le contenu de la zone de texte, et le mode SSML est active automatiquement si le fichier contient des balises `<speak>`, `<break>` ou `<prosody>`) ;
+- cliquer sur "Generer l'audio" (le bouton se desactive et affiche une barre de progression pendant la generation, avec un bouton pour annuler), puis telecharger le fichier.
 
 Aucune cle API n'est necessaire, une connexion Internet est requise (les voix sont fournies par le service Microsoft Edge).
 
@@ -22,8 +23,9 @@ python -m streamlit run ui.py
 
 ## Architecture
 
-- `ui.py` : interface Streamlit (selection de voix, apercu en direct, generation avec progression/annulation, export)
+- `ui.py` : interface Streamlit (selection de voix, apercu en direct, import de fichier, generation avec progression/annulation, export)
 - `services/tts_studio.py` : moteur TTS Edge (`edge-tts`), decoupage SSML en segments texte/pause et insertion de silence exacte
+- `services/file_text.py` : extraction de texte depuis des fichiers `.txt`, `.docx` et `.pdf`
 - `config.py` : configuration (chemin de sortie des fichiers audio)
 
 ## Tests
