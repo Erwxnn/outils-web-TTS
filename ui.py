@@ -140,21 +140,31 @@ def main() -> None:
 
     with st.container(border=True):
         st.subheader("🎙️ Voix")
-        col_voice, col_settings, col_replay = st.columns([8, 1, 1])
+        col_voice, col_buttons = st.columns([8, 2])
         with col_voice:
             voice = st.selectbox("Voix", voices, format_func=voice_label)
-        with col_settings:
-            with st.popover("", icon=":material/tune:", help="Parametres de la voix"):
-                st.caption("Parametres de la voix")
-                rate = st.slider("Vitesse", -50, 50, 0, help="Pourcentage, -50 a 50")
-                volume = st.slider("Volume", -50, 50, 0, help="Pourcentage, -50 a 50")
-                pitch = st.slider("Hauteur de voix", -100, 100, 0, help="Variation en Hz")
-        with col_replay:
-            replay_clicked = st.button(
-                "",
-                icon=":material/replay:",
-                help="Rejouer l'apercu vocal (utile si la lecture automatique a ete bloquee).",
-            )
+        with col_buttons:
+            # Spacer to line up with the selectbox's label, then group the
+            # settings and replay buttons in their own row so they always
+            # stay side by side on the same line, even if this outer column
+            # wraps below the selectbox on a narrow screen.
+            st.write("")
+            col_settings, col_replay = st.columns(2, gap="small")
+            with col_settings:
+                with st.popover(
+                    "", icon=":material/tune:", help="Parametres de la voix", width="stretch"
+                ):
+                    st.caption("Parametres de la voix")
+                    rate = st.slider("Vitesse", -50, 50, 0, help="Pourcentage, -50 a 50")
+                    volume = st.slider("Volume", -50, 50, 0, help="Pourcentage, -50 a 50")
+                    pitch = st.slider("Hauteur de voix", -100, 100, 0, help="Variation en Hz")
+            with col_replay:
+                replay_clicked = st.button(
+                    "",
+                    icon=":material/replay:",
+                    help="Rejouer l'apercu vocal (utile si la lecture automatique a ete bloquee).",
+                    width="stretch",
+                )
 
         voice_info = f"{voice.name} | {voice.locale}"
         if voice.gender:
