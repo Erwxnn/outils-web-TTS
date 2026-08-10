@@ -352,7 +352,7 @@ def main() -> None:
         st.progress(min(job["progress"], 1.0), text=stage_label)
 
         cancel_clicked = st.button(
-            "❌ Annuler la generation",
+            " Annuler la generation",
             icon=":material/cancel:",
             width="stretch",
             disabled=job["cancel_event"].is_set(),
