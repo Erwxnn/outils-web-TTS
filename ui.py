@@ -129,6 +129,7 @@ def main() -> None:
     st.session_state.setdefault("preview_signature", None)
     st.session_state.setdefault("preview_audio", None)
     st.session_state.setdefault("gen_job", None)
+    st.session_state.setdefault("completion_message", None)
     st.session_state.setdefault("text_mode", "Texte brut")
     st.session_state.setdefault("text_area_content", DEFAULT_TEXT)
     st.session_state.setdefault("last_uploaded_file_id", None)
@@ -291,36 +292,14 @@ def main() -> None:
     generating = job is not None
 
     # The nav bar's native "running" indicator is tied 1:1 to each polling
-    # rerun triggered below (every ~250ms): it resets/flickers in lockstep
-    # with the generation progress bar instead of just spinning for the real,
-    # uninterrupted duration of the job. We hide it and draw our own
-    # indicator instead. Crucially, this markup is byte-identical on every
-    # rerun while a job is in flight (no per-rerun token), so Streamlit's
-    # frontend keeps the same DOM node mounted and its CSS animation keeps
-    # spinning without a single cut - fully decoupled from `job["progress"]`
-    # - all the way to the job's actual completion (`job["done"]`).
+    # rerun triggered below (every ~250ms), so it would otherwise
+    # reset/flicker in lockstep with the generation progress bar instead of
+    # just spinning for the real, uninterrupted duration of the job. The
+    # progress bar further down already gives the user feedback, so we just
+    # hide the native indicator rather than replacing it with anything.
     if generating and not job["done"]:
         st.markdown(
-            """
-            <style>
-            [data-testid="stStatusWidget"] { display: none !important; }
-            @keyframes tss-nav-spin { to { transform: rotate(360deg); } }
-            .tss-nav-spinner {
-                position: fixed;
-                top: 0.6rem;
-                right: 4.5rem;
-                width: 20px;
-                height: 20px;
-                border: 3px solid rgba(49, 51, 63, 0.15);
-                border-top-color: #ff4b4b;
-                border-radius: 50%;
-                animation: tss-nav-spin 0.8s linear infinite;
-                z-index: 999999;
-                pointer-events: none;
-            }
-            </style>
-            <div class="tss-nav-spinner"></div>
-            """,
+            '<style>[data-testid="stStatusWidget"] { display: none !important; }</style>',
             unsafe_allow_html=True,
         )
 
@@ -359,6 +338,10 @@ def main() -> None:
             thread.start()
             st.rerun()
 
+    if st.session_state["completion_message"]:
+        kind, message = st.session_state.pop("completion_message")
+        getattr(st, kind)(message)
+
     if generating:
         if job["progress"] <= 0.0:
             stage_label = "Connexion au service Edge..."
@@ -379,14 +362,28 @@ def main() -> None:
             st.toast("Annulation en cours...", icon="⏹️")
 
         if job["done"]:
+            # Clear the job and force an immediate rerun rather than just
+            # letting this render stand: the "Generer l'audio" and "Annuler
+            # la generation" buttons above were already drawn earlier in
+            # this same run using the *stale* `generating`/`cancel_event`
+            # state (before we knew the job had finished), so without a
+            # rerun they'd stay stuck disabled until some unrelated widget
+            # happened to trigger the next rerun. The completion message is
+            # stashed in session_state so it survives the rerun and is shown
+            # once the button state has been corrected.
             st.session_state["gen_job"] = None
             if job["cancelled"]:
-                st.warning("Generation annulee.")
+                st.session_state["completion_message"] = ("warning", "Generation annulee.")
             elif job["error"]:
-                st.error(f"Generation impossible : {job['error']}")
+                st.session_state["completion_message"] = (
+                    "error", f"Generation impossible : {job['error']}"
+                )
             else:
                 st.session_state["last_audio"] = job["result_path"]
-                st.success(f"Audio genere : {Path(job['result_path']).name}")
+                st.session_state["completion_message"] = (
+                    "success", f"Audio genere : {Path(job['result_path']).name}"
+                )
+            st.rerun()
         else:
             time.sleep(0.25)
             st.rerun()
