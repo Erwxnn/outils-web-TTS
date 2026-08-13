@@ -9,12 +9,25 @@ import sys
 import threading
 import time
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 import streamlit as st
 
 from config import Settings
 from services.file_text import UnsupportedFileError, extract_text
-from services.tts_studio import TTSCancelled, TTSRequest, TTSStudio, Voice
+from services.tts_studio import (
+    TTSCancelled,
+    TTSRequest,
+    TTSStudio,
+    Voice,
+    VoiceValidationError,
+    collect_request_voice_ids,
+    filter_voices,
+    list_countries,
+    list_genders,
+    list_languages,
+    validate_voice_ids,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -30,8 +43,36 @@ DEFAULT_SSML = """<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesi
 
 # Preview text is intentionally fixed server-side: it is used only to let the
 # user hear a voice/setting change instantly, never shown or editable in the UI.
-PREVIEW_TEXT_PLAIN = "Hello! This is a quick preview of this voice with the current settings."
-PREVIEW_TEXT_SSML = '<speak><p>Hello.</p><break time="500ms"/><p>This is a quick preview.</p></speak>'
+# One sample per language so auditioning a French voice reads French rather than
+# English words with a French accent; anything not listed falls back to English.
+PREVIEW_SAMPLES = {
+    "en": "Hello! This is a quick preview of this voice with the current settings.",
+    "fr": "Bonjour ! Voici un rapide apercu de cette voix avec les reglages actuels.",
+    "es": "Hola! Esta es una vista previa rapida de esta voz con los ajustes actuales.",
+    "de": "Hallo! Dies ist eine kurze Vorschau dieser Stimme mit den aktuellen Einstellungen.",
+    "it": "Ciao! Questa e una breve anteprima di questa voce con le impostazioni attuali.",
+    "pt": "Ola! Esta e uma previa rapida desta voz com as configuracoes atuais.",
+    "nl": "Hallo! Dit is een korte preview van deze stem met de huidige instellingen.",
+}
+PREVIEW_SAMPLE_FALLBACK = PREVIEW_SAMPLES["en"]
+
+# Rows rendered in the audition list. Kept small so the panel stays readable;
+# the count of hidden voices is always shown rather than silently truncated.
+MAX_AUDITION_ROWS = 25
+
+
+def sample_text_for(voice: Voice) -> str:
+    """A short spoken sample in the voice's own language."""
+    language_subtag = voice.locale.split("-")[0].lower() if voice.locale else ""
+    return PREVIEW_SAMPLES.get(language_subtag, PREVIEW_SAMPLE_FALLBACK)
+
+
+def preview_text_for(voice: Voice, ssml_mode: bool) -> str:
+    """The sample to synthesize for a preview, valid in the current text mode."""
+    sample = sample_text_for(voice)
+    if ssml_mode:
+        return f"<speak><p>{xml_escape(sample)}</p></speak>"
+    return sample
 
 
 def configure_logging(output_path: Path) -> None:
@@ -57,7 +98,7 @@ def voice_label(voice: Voice) -> str:
     return voice.label
 
 
-_SSML_HINT_RE = re.compile(r"<\s*(speak|break|prosody)\b", re.IGNORECASE)
+_SSML_HINT_RE = re.compile(r"<\s*(speak|break|prosody|voice)\b", re.IGNORECASE)
 
 
 def _looks_like_ssml(text: str) -> bool:
@@ -86,7 +127,12 @@ def _play_hidden_audio(audio_bytes: bytes) -> None:
     )
 
 
-def _run_generation_job(studio: TTSStudio, request: TTSRequest, job: dict) -> None:
+def _run_generation_job(
+    studio: TTSStudio,
+    request: TTSRequest,
+    job: dict,
+    known_voice_ids: list[str] | None = None,
+) -> None:
     """Run synthesis in a background thread, reporting progress into ``job``.
 
     Only plain-Python mutations happen here (no Streamlit calls), since this
@@ -101,6 +147,7 @@ def _run_generation_job(studio: TTSStudio, request: TTSRequest, job: dict) -> No
             request,
             on_progress=on_progress,
             should_cancel=job["cancel_event"].is_set,
+            known_voice_ids=known_voice_ids,
         )
         job["result_path"] = str(output_path)
     except TTSCancelled:
@@ -159,11 +206,84 @@ def main() -> None:
         )
         return
 
+    known_voice_ids = [v.id for v in voices]
+
     with st.container(border=True):
         st.subheader("🎙️ Voix")
+
+        # --- Filters -------------------------------------------------------
+        # The country list depends on the selected language, so the country
+        # choice is reset whenever the language changes; otherwise Streamlit
+        # would try to restore a value that is no longer among the options.
+        languages = list_languages(voices)
+        col_lang, col_country, col_gender = st.columns(3)
+        with col_lang:
+            language_choice = st.selectbox("Langue", ["Toutes"] + languages, key="filter_language")
+        language = None if language_choice == "Toutes" else language_choice
+
+        if st.session_state.get("_prev_filter_language") != language_choice:
+            st.session_state["filter_country"] = "Tous"
+        st.session_state["_prev_filter_language"] = language_choice
+
+        countries = list_countries(voices, language)
+        with col_country:
+            country_choice = st.selectbox("Pays", ["Tous"] + countries, key="filter_country")
+        country = None if country_choice == "Tous" else country_choice
+
+        with col_gender:
+            gender_choice = st.selectbox(
+                "Genre", ["Tous"] + list_genders(voices), key="filter_gender"
+            )
+        gender = None if gender_choice == "Tous" else gender_choice
+
+        col_search, col_multi = st.columns([3, 1])
+        with col_search:
+            query = st.text_input(
+                "Rechercher",
+                key="filter_query",
+                placeholder="Nom, ShortName, pays... (ex. : andrew multi)",
+            )
+        with col_multi:
+            st.write("")
+            multilingual_only = st.checkbox(
+                "Multilingues seulement",
+                key="filter_multilingual",
+                help=(
+                    "Les voix *MultilingualNeural peuvent parler plusieurs langues. "
+                    "Attention : chaque segment part dans un appel separe, donc la "
+                    "detection automatique de langue ne voit qu'un fragment isole."
+                ),
+            )
+
+        filtered = filter_voices(
+            voices,
+            language=language,
+            country=country,
+            gender=gender,
+            multilingual_only=multilingual_only,
+            query=query,
+        )
+        if not filtered:
+            st.warning("Aucune voix ne correspond a ces filtres : ils sont ignores.")
+            filtered = list(voices)
+
+        # --- Selection -----------------------------------------------------
+        # The committed voice lives in session_state (not in a widget key) so the
+        # "choisir" buttons in the audition list below can set it directly.
+        selected_id = st.session_state.get("selected_voice_id")
+        selected_index = next(
+            (i for i, v in enumerate(filtered) if v.id == selected_id), 0
+        )
+
         col_voice, col_buttons = st.columns([8, 2])
         with col_voice:
-            voice = st.selectbox("Voix", voices, format_func=voice_label)
+            voice = st.selectbox(
+                f"Voix ({len(filtered)} sur {len(voices)})",
+                filtered,
+                index=selected_index,
+                format_func=voice_label,
+            )
+        st.session_state["selected_voice_id"] = voice.id
         with col_buttons:
             # Spacer to line up with the selectbox's label, then group the
             # settings and replay buttons in their own row so they always
@@ -213,7 +333,83 @@ def main() -> None:
         voice_info = f"{voice.name} | {voice.locale}"
         if voice.gender:
             voice_info += f" | {voice.gender}"
+        if voice.is_multilingual:
+            voice_info += " | multilingue"
         st.caption(voice_info)
+
+        # --- Audition list -------------------------------------------------
+        # Lets a voice be heard *without* committing the selection: the play
+        # button synthesizes a sample with that voice only, and the check button
+        # is what actually selects it.
+        audition_voice: Voice | None = None
+        with st.expander(f"Ecouter les voix avant de choisir ({len(filtered)})"):
+            for candidate in filtered[:MAX_AUDITION_ROWS]:
+                col_name, col_play, col_pick = st.columns([7, 1, 1], vertical_alignment="center")
+                with col_name:
+                    is_current = candidate.id == voice.id
+                    marker = "**>**  " if is_current else ""
+                    details = " · ".join(
+                        p
+                        for p in (
+                            candidate.gender,
+                            candidate.country_display,
+                            "multilingue" if candidate.is_multilingual else "",
+                        )
+                        if p
+                    )
+                    st.markdown(
+                        f"{marker}**{candidate.short_display}** — {details}  \n"
+                        f"`{candidate.id}`"
+                    )
+                with col_play:
+                    if st.button(
+                        "",
+                        icon=":material/play_arrow:",
+                        key=f"audition_{candidate.id}",
+                        help=f"Ecouter {candidate.short_display} sans la selectionner",
+                        width="stretch",
+                    ):
+                        audition_voice = candidate
+                with col_pick:
+                    if st.button(
+                        "",
+                        icon=":material/check:",
+                        key=f"pick_{candidate.id}",
+                        help=f"Selectionner {candidate.short_display}",
+                        width="stretch",
+                        disabled=is_current,
+                    ):
+                        st.session_state["selected_voice_id"] = candidate.id
+                        st.rerun()
+
+            hidden = len(filtered) - MAX_AUDITION_ROWS
+            if hidden > 0:
+                st.caption(
+                    f"{hidden} voix supplementaires non affichees. "
+                    "Affine les filtres ou la recherche pour les atteindre."
+                )
+
+    # Auditioning uses plain text so it stays independent of the SSML toggle
+    # below, and its own filename so it never overwrites the main preview.
+    if audition_voice is not None:
+        try:
+            with st.spinner(f"Apercu de {audition_voice.short_display}..."):
+                audition_path = studio.synthesize(
+                    TTSRequest(
+                        text=preview_text_for(audition_voice, ssml_mode=False),
+                        text_mode="plain",
+                        voice_id=audition_voice.id,
+                        rate=rate,
+                        volume=volume,
+                        pitch=pitch,
+                    ),
+                    filename="audition.mp3",
+                    known_voice_ids=known_voice_ids,
+                )
+        except Exception as exc:  # noqa: BLE001 - surfaced to the user as-is
+            st.toast(f"Apercu impossible : {exc}", icon="⚠️")
+        else:
+            _play_hidden_audio(audition_path.read_bytes())
 
     with st.container(border=True):
         st.subheader("📝 Texte")
@@ -243,8 +439,12 @@ def main() -> None:
         text_mode = st.segmented_control("Mode texte", ["Texte brut", "SSML"], key="text_mode")
         if text_mode == "SSML":
             st.caption(
-                "Les balises <break time=\"...\"/> inserent un silence de la duree exacte, et "
-                "<prosody rate=\"slow|medium|fast\"> ajuste localement la vitesse de lecture. "
+                "Les balises <break time=\"...\"/> inserent un silence de la duree exacte, "
+                "<prosody rate=\"slow|medium|fast\"> ajuste localement la vitesse de lecture, et "
+                "<voice name=\"...\"> fait lire ce segment avec une autre voix Edge (ShortName) "
+                "que celle choisie ci-dessus -- utile pour un mot en francais au milieu d'un "
+                "texte lu par une voix anglaise, par exemple "
+                "<voice name=\"fr-FR-HenriNeural\">Saigner.</voice>. "
                 "Le reste du balisage est ignore. Chaque segment de texte et chaque pause "
                 "declenchent un appel reseau separe : un texte avec beaucoup de balises "
                 "prend donc plus de temps a generer."
@@ -264,7 +464,7 @@ def main() -> None:
 
     # Live preview: regenerated only when the voice or a setting actually changes.
     # The preview text and audio player are intentionally not shown to the user.
-    preview_text = PREVIEW_TEXT_SSML if text_mode == "SSML" else PREVIEW_TEXT_PLAIN
+    preview_text = preview_text_for(voice, ssml_mode=text_mode == "SSML")
     preview_signature = (voice.id, rate, volume, pitch, text_mode)
     just_generated = False
     if preview_signature != st.session_state["preview_signature"]:
@@ -278,7 +478,9 @@ def main() -> None:
         )
         try:
             with st.spinner("Apercu en cours..."):
-                preview_path = studio.synthesize(preview_request, filename="preview.mp3")
+                preview_path = studio.synthesize(
+                    preview_request, filename="preview.mp3", known_voice_ids=known_voice_ids
+                )
                 st.session_state["preview_audio"] = preview_path.read_bytes()
                 st.session_state["preview_signature"] = preview_signature
                 just_generated = True
@@ -312,31 +514,45 @@ def main() -> None:
         help="Desactive pendant qu'une generation est en cours." if generating else None,
     )
     if generate and not generating:
-        if not text.strip():
+        request_text = text.strip()
+        request_mode = "ssml" if text_mode == "SSML" else "plain"
+        if not request_text:
             st.error("Ajoute du texte avant de generer.")
         else:
-            request = TTSRequest(
-                text=text.strip(),
-                text_mode="ssml" if text_mode == "SSML" else "plain",
-                voice_id=voice.id,
-                rate=rate,
-                volume=volume,
-                pitch=pitch,
-            )
-            job = {
-                "progress": 0.0,
-                "done": False,
-                "cancelled": False,
-                "error": None,
-                "result_path": None,
-                "cancel_event": threading.Event(),
-            }
-            st.session_state["gen_job"] = job
-            thread = threading.Thread(
-                target=_run_generation_job, args=(studio, request, job), daemon=True
-            )
-            thread.start()
-            st.rerun()
+            # Validated here, on the main thread, so an invalid <voice name="...">
+            # is reported instantly instead of failing partway through the job.
+            try:
+                validate_voice_ids(
+                    collect_request_voice_ids(request_text, request_mode, voice.id),
+                    known_voice_ids,
+                )
+            except VoiceValidationError as exc:
+                st.error(f"Nom de voix invalide dans le SSML : {exc}")
+            else:
+                request = TTSRequest(
+                    text=request_text,
+                    text_mode=request_mode,
+                    voice_id=voice.id,
+                    rate=rate,
+                    volume=volume,
+                    pitch=pitch,
+                )
+                job = {
+                    "progress": 0.0,
+                    "done": False,
+                    "cancelled": False,
+                    "error": None,
+                    "result_path": None,
+                    "cancel_event": threading.Event(),
+                }
+                st.session_state["gen_job"] = job
+                thread = threading.Thread(
+                    target=_run_generation_job,
+                    args=(studio, request, job, known_voice_ids),
+                    daemon=True,
+                )
+                thread.start()
+                st.rerun()
 
     if st.session_state["completion_message"]:
         kind, message = st.session_state.pop("completion_message")

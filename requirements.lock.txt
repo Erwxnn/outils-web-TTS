@@ -1,0 +1,71 @@
+# Lock complet de l'environnement (dependances directes + transitives).
+#
+# Ce fichier est genere, ne pas l'editer a la main. C'est lui qu'installe
+# launch_ui.bat, pour que l'environnement soit reproductible a l'identique.
+#
+# Les dependances directes du projet sont declarees dans requirements.txt.
+# Pour regenerer ce lock apres avoir modifie requirements.txt :
+#
+#   ".venv\Scripts\python.exe" -m pip install -r requirements.txt
+#   ".venv\Scripts\python.exe" -m pip freeze > requirements.lock.txt
+#
+# Genere avec Python 3.14 sur Windows.
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
+altair==6.2.2
+anyio==4.14.2
+attrs==26.1.0
+blinker==1.9.0
+certifi==2026.7.22
+charset-normalizer==3.5.0
+click==8.4.2
+colorama==0.4.6
+edge-tts==7.2.8
+frozenlist==1.8.0
+gitdb==4.0.12
+GitPython==3.1.59
+h11==0.16.0
+httptools==0.8.0
+idna==3.18
+iniconfig==2.3.0
+itsdangerous==2.2.0
+Jinja2==3.1.6
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+lxml==6.1.1
+MarkupSafe==3.0.3
+multidict==6.7.1
+narwhals==2.24.0
+numpy==2.5.2
+packaging==26.3
+pandas==3.0.5
+pillow==12.3.0
+pluggy==1.6.0
+propcache==0.5.2
+protobuf==7.35.1
+pyarrow==24.0.0
+pydeck==0.9.3
+Pygments==2.20.0
+pypdf==6.15.0
+pytest==9.1.1
+python-dateutil==2.9.0.post0
+python-docx==1.2.0
+python-multipart==0.0.32
+referencing==0.37.0
+requests==2.34.2
+rpds-py==2026.6.3
+six==1.17.0
+smmap==5.0.3
+starlette==1.6.0
+streamlit==1.60.0
+tabulate==0.10.0
+tenacity==9.1.4
+toml==0.10.2
+typing_extensions==4.16.0
+tzdata==2026.3
+urllib3==2.7.0
+uvicorn==0.52.2
+watchdog==6.0.0
+websockets==16.1.1
+yarl==1.24.5

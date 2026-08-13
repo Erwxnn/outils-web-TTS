@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import difflib
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Literal, Union
+from typing import Any, Callable, Collection, Iterable, Literal, Union
 
 
 TextMode = Literal["plain", "ssml"]
@@ -17,6 +18,37 @@ TextMode = Literal["plain", "ssml"]
 
 class TTSCancelled(Exception):
     """Raised when a synthesis job is cancelled while it is running."""
+
+
+class VoiceValidationError(Exception):
+    """Raised when a voice name in the request is malformed or unknown.
+
+    Checked *before* any network call, so a typo in a ``<voice name="...">``
+    fails immediately with an actionable message instead of aborting halfway
+    through a synthesis job with a raw websocket error.
+    """
+
+
+# Parsed out of Edge's ``FriendlyName``, which looks like
+# "Microsoft Ava Online (Natural) - English (United States)". The language and
+# country names come straight from Microsoft this way, so no locale database
+# (nor extra dependency) is needed. Anything that does not match falls back to
+# the raw locale subtags.
+_FRIENDLY_TAIL_RE = re.compile(r"^([^()]+?)\s*\(([^()]+)\)$")
+
+
+def parse_friendly_name(friendly_name: str) -> tuple[str, str]:
+    """Extract ``(language, country)`` from an Edge ``FriendlyName``.
+
+    Returns ``("", "")`` when the name does not follow the expected shape.
+    """
+    if " - " not in friendly_name:
+        return "", ""
+    tail = friendly_name.rsplit(" - ", 1)[-1].strip()
+    match = _FRIENDLY_TAIL_RE.match(tail)
+    if match is None:
+        return "", ""
+    return match.group(1).strip(), match.group(2).strip()
 
 
 @dataclass(frozen=True)
@@ -28,6 +60,8 @@ class Voice:
     locale: str
     gender: str = ""
     description: str = ""
+    language: str = ""
+    country: str = ""
 
     @property
     def label(self) -> str:
@@ -36,12 +70,199 @@ class Voice:
             parts.append(self.locale)
         if self.gender:
             parts.append(self.gender)
+        # The ShortName is the exact value a <voice name="..."> tag expects, so
+        # it is shown here to be readable straight off the selector.
+        if self.id and self.id not in parts:
+            parts.append(self.id)
         return " - ".join(parts)
+
+    @property
+    def language_display(self) -> str:
+        """Human-readable language, falling back to the locale's language subtag."""
+        if self.language:
+            return self.language
+        return self.locale.split("-")[0] if self.locale else ""
+
+    @property
+    def country_display(self) -> str:
+        """Human-readable country, falling back to the locale's region subtag."""
+        if self.country:
+            return self.country
+        parts = self.locale.split("-")
+        return parts[1] if len(parts) > 1 else ""
+
+    @property
+    def short_display(self) -> str:
+        """Just the voice's own name, e.g. ``AndrewMultilingual`` for
+        ``en-US-AndrewMultilingualNeural`` -- short enough for a browse list."""
+        stem = self.id
+        prefix = f"{self.locale}-"
+        if self.locale and stem.startswith(prefix):
+            stem = stem[len(prefix) :]
+        else:
+            # Fall back to dropping the first two dash-separated subtags.
+            bits = stem.split("-")
+            if len(bits) > 2:
+                stem = "-".join(bits[2:])
+        if stem.endswith("Neural"):
+            stem = stem[: -len("Neural")]
+        return stem or self.id
+
+    @property
+    def is_multilingual(self) -> bool:
+        """Whether this is one of Edge's ``*MultilingualNeural`` voices."""
+        return "multilingual" in self.id.lower()
 
     @property
     def search_text(self) -> str:
         """Lowercase text used to filter voices from the search box."""
-        return f"{self.name} {self.locale} {self.gender}".lower()
+        return (
+            f"{self.name} {self.locale} {self.gender} {self.id} "
+            f"{self.language} {self.country}"
+        ).lower()
+
+
+def voice_from_row(row: dict[str, Any]) -> Voice:
+    """Build a :class:`Voice` from one ``edge_tts.list_voices()`` entry."""
+    short_name = str(row.get("ShortName", ""))
+    friendly_name = str(row.get("FriendlyName") or short_name)
+    language, country = parse_friendly_name(friendly_name)
+    return Voice(
+        id=short_name,
+        name=friendly_name,
+        locale=str(row.get("Locale", "")),
+        gender=str(row.get("Gender", "")),
+        description=short_name,
+        language=language,
+        country=country,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Voice browsing: pure helpers used by the UI's language/country filters.
+# ---------------------------------------------------------------------------
+
+
+def list_languages(voices: Iterable[Voice]) -> list[str]:
+    """Sorted, de-duplicated language names present in ``voices``."""
+    return sorted({v.language_display for v in voices if v.language_display})
+
+
+def list_countries(voices: Iterable[Voice], language: str | None = None) -> list[str]:
+    """Sorted country names, optionally restricted to a single language."""
+    return sorted(
+        {
+            v.country_display
+            for v in voices
+            if v.country_display and (not language or v.language_display == language)
+        }
+    )
+
+
+def list_genders(voices: Iterable[Voice]) -> list[str]:
+    """Sorted gender values present in ``voices``."""
+    return sorted({v.gender for v in voices if v.gender})
+
+
+def filter_voices(
+    voices: Iterable[Voice],
+    *,
+    language: str | None = None,
+    country: str | None = None,
+    gender: str | None = None,
+    multilingual_only: bool = False,
+    query: str | None = None,
+) -> list[Voice]:
+    """Filter voices for the browse panel.
+
+    Every criterion is optional and they combine with AND. ``query`` is matched
+    case-insensitively against the voice's searchable text, term by term, so
+    "andrew multi" matches ``en-US-AndrewMultilingualNeural``.
+    """
+    terms = (query or "").lower().split()
+    result = []
+    for voice in voices:
+        if language and voice.language_display != language:
+            continue
+        if country and voice.country_display != country:
+            continue
+        if gender and voice.gender != gender:
+            continue
+        if multilingual_only and not voice.is_multilingual:
+            continue
+        if terms:
+            haystack = voice.search_text
+            if not all(term in haystack for term in terms):
+                continue
+        result.append(voice)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Voice validation
+#
+# This mirrors edge-tts's own check (``data_classes.TTSConfig``), which only
+# validates the *shape* of a voice name -- a well-formed but non-existent name
+# such as "fr-FR-JeanNeural" passes it and then fails mid-synthesis with a raw
+# websocket error, after part of the output has already been written. Checking
+# names against the real voice list up front turns that into one clear message.
+# ---------------------------------------------------------------------------
+
+_VOICE_ID_RE = re.compile(r"^[a-z]{2,}-[A-Z]{2,}-.+Neural$")
+
+
+def collect_request_voice_ids(text: str, text_mode: TextMode, base_voice_id: str) -> list[str]:
+    """Every distinct voice a request will actually use, base voice included.
+
+    Order is stable: the base voice first, then ``<voice name="...">``
+    overrides in document order.
+    """
+    ids = [base_voice_id] if base_voice_id else []
+    if text_mode == "ssml":
+        for segment in parse_ssml_segments(text):
+            if isinstance(segment, TextSegment) and segment.voice_id:
+                ids.append(segment.voice_id)
+    seen: set[str] = set()
+    return [i for i in ids if not (i in seen or seen.add(i))]
+
+
+def validate_voice_ids(
+    voice_ids: Iterable[str],
+    known_voice_ids: Collection[str] | None = None,
+) -> None:
+    """Raise :class:`VoiceValidationError` on any malformed or unknown voice.
+
+    ``known_voice_ids`` is the list of voices the service actually offers. When
+    omitted, only the name's shape is checked (no network access needed).
+    """
+    malformed: list[str] = []
+    unknown: list[tuple[str, list[str]]] = []
+
+    known_lookup = {k.lower(): k for k in known_voice_ids} if known_voice_ids else {}
+
+    for voice_id in voice_ids:
+        if _VOICE_ID_RE.match(voice_id) is None:
+            malformed.append(voice_id)
+        elif known_lookup and voice_id.lower() not in known_lookup:
+            close = difflib.get_close_matches(voice_id, list(known_lookup.values()), n=3, cutoff=0.6)
+            unknown.append((voice_id, close))
+
+    if not malformed and not unknown:
+        return
+
+    problems: list[str] = []
+    for voice_id in malformed:
+        problems.append(
+            f"'{voice_id}' n'a pas un format de nom valide "
+            "(attendu : langue-REGION-NomNeural, par exemple fr-FR-HenriNeural)."
+        )
+    for voice_id, close in unknown:
+        message = f"'{voice_id}' ne correspond a aucune voix disponible."
+        if close:
+            message += " Vouliez-vous dire " + ", ".join(close) + " ?"
+        problems.append(message)
+
+    raise VoiceValidationError(" ".join(problems))
 
 
 @dataclass(frozen=True)
@@ -125,10 +346,12 @@ def ssml_to_plain_text(ssml: str) -> str:
 
 @dataclass(frozen=True)
 class TextSegment:
-    """A chunk of narration text, optionally with a local rate adjustment."""
+    """A chunk of narration text, optionally with a local rate adjustment
+    and/or a voice override (see ``<voice name="...">`` in ``parse_ssml_segments``)."""
 
     text: str
     rate_delta: int = 0
+    voice_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -142,7 +365,13 @@ Segment = Union[TextSegment, BreakSegment]
 
 
 def parse_ssml_segments(ssml: str) -> list[Segment]:
-    """Parse ``<break>`` and ``<prosody rate="...">`` into an ordered segment list.
+    """Parse ``<break>``, ``<prosody rate="...">`` and ``<voice name="...">`` into
+    an ordered segment list.
+
+    ``<voice name="...">`` lets a segment be spoken with a different Edge voice
+    than the one selected in the UI (``name`` is an Edge ``ShortName``, e.g.
+    ``fr-FR-HenriNeural``) -- handy for mixed-language text where a French word
+    should not be read with the base voice's English phonetics.
 
     Falls back to a single approximated text segment if the input is not
     well-formed XML (arbitrary pasted SSML sometimes is not).
@@ -155,14 +384,21 @@ def parse_ssml_segments(ssml: str) -> list[Segment]:
 
     segments: list[Segment] = []
 
-    def _walk(element: ET.Element, rate_delta: int) -> None:
+    def _walk(element: ET.Element, rate_delta: int, voice_id: str | None) -> None:
         tag = element.tag.split("}")[-1].lower()
         local_rate = rate_delta
+        local_voice = voice_id
         if tag == "prosody":
             local_rate = rate_delta + _parse_rate_attr(element.attrib.get("rate"))
+        elif tag == "voice":
+            name = element.attrib.get("name", "").strip()
+            if name:
+                local_voice = name
 
         if element.text and element.text.strip():
-            segments.append(TextSegment(text=element.text.strip(), rate_delta=local_rate))
+            segments.append(
+                TextSegment(text=element.text.strip(), rate_delta=local_rate, voice_id=local_voice)
+            )
 
         for child in element:
             child_tag = child.tag.split("}")[-1].lower()
@@ -171,12 +407,19 @@ def parse_ssml_segments(ssml: str) -> list[Segment]:
                 if duration_ms > 0:
                     segments.append(BreakSegment(duration_ms=duration_ms))
             else:
-                _walk(child, local_rate)
+                _walk(child, local_rate, local_voice)
 
+            # ``child.tail`` sits *inside* ``element``, after ``child``, so it
+            # inherits this element's own rate/voice -- not the context that was
+            # passed in. Using the latter would silently drop the prosody rate or
+            # the voice override for any text following a nested tag, e.g. the
+            # "Se procurer." in <voice name="fr-FR-..">Obtenir.<break/>Se procurer.</voice>.
             if child.tail and child.tail.strip():
-                segments.append(TextSegment(text=child.tail.strip(), rate_delta=rate_delta))
+                segments.append(
+                    TextSegment(text=child.tail.strip(), rate_delta=local_rate, voice_id=local_voice)
+                )
 
-    _walk(root, 0)
+    _walk(root, 0, None)
 
     if not segments:
         return [TextSegment(text=ssml_to_plain_text(ssml))]
@@ -222,16 +465,7 @@ class EdgeTTSEngine:
         import edge_tts
 
         rows: list[dict[str, Any]] = await edge_tts.list_voices()
-        return [
-            Voice(
-                id=str(row.get("ShortName", "")),
-                name=str(row.get("FriendlyName") or row.get("ShortName", "")),
-                locale=str(row.get("Locale", "")),
-                gender=str(row.get("Gender", "")),
-                description=str(row.get("ShortName", "")),
-            )
-            for row in rows
-        ]
+        return [voice_from_row(row) for row in rows]
 
     def synthesize(
         self,
@@ -318,7 +552,7 @@ class EdgeTTSEngine:
                         effective_rate = max(-100, min(100, request.rate + segment.rate_delta))
                         communicate = edge_tts.Communicate(
                             segment.text,
-                            request.voice_id,
+                            segment.voice_id or request.voice_id,
                             rate=f"{effective_rate:+d}%",
                             volume=f"{request.volume:+d}%",
                             pitch=f"{request.pitch:+d}Hz",
@@ -356,7 +590,14 @@ class TTSStudio:
         filename: str | None = None,
         on_progress: Callable[[float], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
+        known_voice_ids: Collection[str] | None = None,
     ) -> Path:
+        # Validate before anything is opened or sent: a bad <voice name="...">
+        # should not leave a truncated file behind.
+        validate_voice_ids(
+            collect_request_voice_ids(request.text, request.text_mode, request.voice_id),
+            known_voice_ids,
+        )
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             filename = f"tts-{timestamp}.mp3"
